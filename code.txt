@@ -1,0 +1,209 @@
+satisfaction <- read.csv("~/Paper/satisfaction_airline.csv")
+head(satisfaction)
+str(satisfaction)
+summary(satisfaction)
+#The raw data contains 129880 rows (passengers) and 24 columns (features). The first step is to check the number of missing values in each column. 
+#There are 393 missing values in "Arrival.Delay.in.Minutes" columns. Prior to main data analysis, data cleaning should be performed first. 
+#The next step was to remove all rows with missing values.
+
+sapply(satisfaction, function(x) sum(is.na(x)))
+satisfaction <- satisfaction[complete.cases(satisfaction), ]
+#In the original dataset, the zero entries in the columns Service1 to Service14 are "Not Applicable" responses by the passengers.
+#Since such responses are treated as missing values, the next task is to remove the rows with such entries.
+#From 129880 observations, the data contains 119255 (91.8%) observations with no missing values. 
+
+library(dplyr)
+satisfaction1 <- filter(satisfaction, Service1 > 0, Service2 > 0, Service3 > 0, Service4 > 0, Service5 > 0, Service6 > 0,
+                        Service7 > 0, Service8 > 0, Service9 > 0, Service10 > 0, Service11 > 0, Service12 > 0, 
+                        Service13 > 0, Service14 > 0)
+sapply(satisfaction1, function(x) sum(is.na(x)))
+
+#Removing the attribute id
+
+satisfaction1$id <- NULL
+
+#Creating Dummy Variables
+#There are categorical variables in the dataset such as "Satisfaction", "Gender", "Customer Type", "Travel      #Type", and "Class".
+#They need to be converted to dummy variables before they can be used for modeling.
+
+library(dummies)
+satisfaction1_new <- dummy.data.frame(satisfaction1, sep = ".")
+str(satisfaction1_new)
+head(satisfaction1_new)
+summary(satisfaction1_new)
+attach(satisfaction1_new)
+table(Satisfaction_v2.satisfied)
+#Data Wrangling
+#The numeric variables such as "Departure Delay in Minutes" and "Departure Delay in Minutes" are converted into
+#categorical variables. The Bureau of Transportation Statistics (BTS) records a flight as "on time" 
+#if it arrives or departs at the gate of the destination or origin airport fewer than 15 minutes 
+#after the scheduled arrival time. The Eurocontrol  defines short-haul routes as shorter than 1,500 km.
+#Hence, the new categorical variable for flight distance has two categories which respectively represent
+#the flight distance of 0 to 1,500 km and greater than 1,500 km.
+
+attach(satisfaction1_new)
+satisfaction1_new$Flight.Distance <- cut(Flight.Distance, breaks=c(0,1500,7000), labels=c("0","1"), right=FALSE)
+satisfaction1_new$Departure.Delay.in.Minutes <- cut(Departure.Delay.in.Minutes, breaks=c(0,15,2000), labels=c("0","1"), right=FALSE)
+satisfaction1_new$Arrival.Delay.in.Minutes <- cut(Arrival.Delay.in.Minutes, breaks=c(0,15,2000), labels=c("0","1"), right=FALSE)
+summary(satisfaction1_new)
+table(Departure.Delay.in.Minutes)
+table(Arrival.Delay.in.Minutes)
+#The final dataset contains 119255 observations with no missing data and 29 variables including the dummy variables.
+
+#Exploring correlations of the airline services to determine the correlated variables 
+head(satisfaction1_new)
+str(satisfaction1_new)
+services <- c('Service1', 'Service2','Service3','Service4','Service5','Service6','Service7','Service8','Service9',
+              'Service10','Service11','Service12','Service13','Service14')
+newdf <- satisfaction1_new[services]
+corr <- cor(newdf, method="spearman")
+print(corr)
+library(ggcorrplot)
+ggcorrplot(corr)
+#Using the polychoric correlation matrix to perform a factor analysis for dimension reduction
+library(polycor)               # for hetcor()
+pc <- hetcor(newdf, ML=TRUE)   # polychoric corr matrix
+print(pc)
+library(psych)
+library(GPArotation)
+# Determine Number of Factors to Extract
+library(nFactors)
+ev <- eigen(cor(newdf)) # get eigenvalues
+ap <- parallel(subject=nrow(newdf),var=ncol(newdf),
+               rep=100,cent=.05)
+nS <- nScree(x=ev$values, aparallel=ap$eigen$qevpea)
+plotnScree(nS)
+threefactor <- fa(r=pc$correlations,nfactors = 3,rotate = "varimax")
+summary(threefactor)
+print(threefactor$loadings,cutoff = 0.3)
+fa.diagram(threefactor)
+#Computing factor scores 
+threefactor$scores <- factor.scores(newdf,threefactor)
+dim(threefactor$scores$scores)
+#Binding factor scores and original data
+satisfaction1_new <- cbind(satisfaction1_new,threefactor$scores$scores)
+#Dropping unwanted variables
+mynewdf <- satisfaction1_new[ -c(33:35) ]
+str(mynewdf)
+library(data.table)
+setnames(mynewdf, old=c("MR1","MR2","MR3"), new=c("Factor1", "Factor2","Factor3"))
+str(mynewdf)
+head(mynewdf)
+### Implementing the Logistic Regression Algorithm
+
+#### Building a logistic regression model using all features
+
+library(caret)
+mydf_logist <- satisfaction1_new[ -c(1,4:5,9,11:12,14:27) ]
+setnames(mydf_logist, old=c("MR1","MR2","MR3"), new=c("Factor1", "Factor2","Factor3"))
+str(mydf_logist)
+intrain <- createDataPartition(mydf_logist$Satisfaction_v2.satisfied,p=0.7,list=FALSE)
+set.seed(2018)
+training<- mydf_logist[intrain,]
+testing<- mydf_logist[-intrain,]
+dim(training)
+dim(testing)
+LogModel <- glm(Satisfaction_v2.satisfied ~ .,family=binomial(link="logit"),data=training)
+print(summary(LogModel1))
+#Testing the model with all features
+fitted.results <- predict(LogModel,newdata=testing,type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != testing$Satisfaction_v2.satisfied)
+print(paste('Accuracy',1-misClasificError))
+print("Confusion Matrix for Logistic Regression")
+table(testing$Satisfaction_v2.satisfied, fitted.results > 0.5)
+library(MASS)
+exp(cbind(OR=coef(LogModel), confint(LogModel)))
+library(ROCR)
+#Creating prediction object from ROCR
+pr <- prediction(fitted.results, testing$Satisfaction_v2.satisfied)
+#Plotting ROC curve
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf)
+#Calculating AUC value
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+summary(LogModel)
+#Determining feature importance
+varImp(LogModel)
+
+#Implementing the Random Forest Algorithm
+
+#Building a random forest model using all features
+
+library(dplyr)
+mydf_rf <- satisfaction1_new[ -c(1,4:5,9,11:12,30:32) ]
+#Converting features into factors for CART procedure
+mydf_rf$Satisfaction_v2.satisfied <- as.factor(mydf_rf$Satisfaction_v2.satisfied)
+mydf_rf$Gender.Female <- as.factor(mydf_rf$Gender.Female)
+mydf_rf$Customer.Type.LoyalCustomer <- as.factor(mydf_rf$Customer.Type.LoyalCustomer)
+mydf_rf$Travel.Type.Business <- as.factor(mydf_rf$Travel.Type.Business)
+mydf_rf$Class.Business <- as.factor(mydf_rf$Class.Business)
+mydf_rf$Service1 <- as.factor(mydf_rf$Service1)
+mydf_rf$Service2 <- as.factor(mydf_rf$Service2)
+mydf_rf$Service3 <- as.factor(mydf_rf$Service3)
+mydf_rf$Service4 <- as.factor(mydf_rf$Service4)
+mydf_rf$Service5 <- as.factor(mydf_rf$Service5)
+mydf_rf$Service6<- as.factor(mydf_rf$Service6)
+mydf_rf$Service7 <- as.factor(mydf_rf$Service7)
+mydf_rf$Service8 <- as.factor(mydf_rf$Service8)
+mydf_rf$Service9 <- as.factor(mydf_rf$Service9)
+mydf_rf$Service10 <- as.factor(mydf_rf$Service10)
+mydf_rf$Service11 <- as.factor(mydf_rf$Service11)
+mydf_rf$Service12 <- as.factor(mydf_rf$Service12)
+mydf_rf$Service13 <- as.factor(mydf_rf$Service13)
+mydf_rf$Service14 <- as.factor(mydf_rf$Service14)
+str(mydf_rf)
+#Splitting data into train and Validation sets (Training Set : Validation Set = 70 : 30 (random))
+library(caret)
+inTrain <- createDataPartition(y = mydf_rf$Satisfaction_v2.satisfied, p=0.7, list=FALSE)
+set.seed(2018)
+train <- mydf_rf[inTrain,]
+test <- mydf_rf[-inTrain,]
+dim(train)
+dim(test)
+library(randomForest)
+model_rf1 <- randomForest(Satisfaction_v2.satisfied~., data = train, importance = TRUE)
+model_rf1
+predictprob1 <- predict(model_rf1, test, type="prob")
+predict1 <- predict(model_rf1, test)
+confusionMatrix(predict1, test$Satisfaction_v2.satisfied, positive = "1")
+#Creating prediction object from ROCR
+library(ROCR)
+pr1 <- prediction(predictprob1[,2], test$Satisfaction_v2.satisfied)
+#Plotting ROC curve
+prf1 <- performance(pr1, measure = "tpr", x.measure = "fpr")
+plot(prf1)
+#Calculating AUC value
+auc <- performance(pr1, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+#Fine tuning parameters of Random Forest model
+#changing the number of variables to try at each split
+#mtry = 6, 8, 12
+model_rf2 <- randomForest(Satisfaction_v2.satisfied ~ ., data = train, ntree = 500, mtry = 8, importance = TRUE)
+model_rf2
+predictprob2 <- predict(model_rf2, test, type="prob")
+predict2 <- predict(model_rf2, test)
+confusionMatrix(predict2, test$Satisfaction_v2.satisfied, positive = "1")
+#Creating prediction object from ROCR
+library(ROCR)
+pr2 <- prediction(predictprob2[,2], test$Satisfaction_v2.satisfied)
+#plotting ROC curve
+prf2 <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf2)
+#Calculating AUC value
+auc <- performance(pr2, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+#Plotting the random forest error rates by number of trees
+plot(model_rf2)
+#Plotting the true random forest model to decide on mtry
+t <- tuneRF(train[, -18], train[, 18], stepFactor = 0.5, plot = TRUE, ntreeTry = 500, trace = TRUE, improve = 0.05)
+#Fitting the random forest model after tuning
+rfModel_new <- randomForest(Satisfaction_v2.satisfied ~., data = train, ntree = 500, mtry = 8, importance = TRUE)
+print(rfModel_new)
+pred_rf_new <- predict(rfModel_new, test)
+caret::confusionMatrix(pred_rf_new, test$Satisfaction_v2.satisfied, positive = "1")
+varImpPlot(rfModel_new, sort=T, n.var = 10, main = 'Top 10 Feature Importance')
